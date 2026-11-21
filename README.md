@@ -251,6 +251,29 @@ docker exec -it kungfu_redis redis-cli KEYS "session:*"
 
 ---
 
+## Concurrency Model
+
+The project does not use a thread pool. Each long-running thread has one fixed job, and short tasks run on detached threads.
+
+| Thread | Where | Role |
+|---|---|---|
+| Network thread (server) | `SocketServer::start` | Runs the websocketpp / Asio event loop: connections and incoming commands (`LOGIN`, `MOVE`, `JUMP`, …) |
+| Game loop thread (server) | `SocketServer::game_loop` | Every ~30 ms: matchmaking, advancing each room's `GameEngine`, reconnect countdowns, broadcasting state |
+| Network thread (client) | `SocketClient::connect_to_server` | Receives server messages and updates the local copy of the game state |
+| Main thread (client) | `main.cpp` | OpenCV render and input loop (~60 FPS) |
+| Detached threads | `RedisSessionStore::set_session`, `SoundPlayer::play` | One short-lived thread per call, so Redis writes and sound playback never block the game or render loop |
+
+Shared state is protected with mutexes:
+
+- **`SocketServer`** – `m_clients_mutex` (connected clients), `m_rooms_mutex` (rooms and their engines), `m_sounds_mutex` (pending sound events). Both the network thread and the game-loop thread use them.
+- **`SocketClient`** – `state_mutex` guards the received game state. A `condition_variable` (`m_state_cv`) wakes the render loop in `wait_for_update()` as soon as a new state arrives, instead of waiting for the full frame time.
+- **`UserManager`** – `m_mutex` makes reads and writes of `users.json` and ELO updates thread-safe.
+- **Atomics** – `std::atomic` counters in `SoundPlayer` (unique MCI aliases) and in the load tester (success/failure counts).
+
+`GameHistoryLogger` writes to `game_history.log` synchronously on the game-loop thread, once per finished game.
+
+---
+
 ## Design Notes
 
 - **Authoritative server** – clients only send requests. All rules, timing and captures run in the server's `GameEngine`, and clients render the state they receive.
