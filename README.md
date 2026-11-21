@@ -1,185 +1,265 @@
-# KungFu Chess — Distributed Authoritative Real-Time System
+# KungFu Chess — Real-Time Multiplayer Chess Engine
 
 ![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
+![OpenCV](https://img.shields.io/badge/OpenCV-4.x-5C3EE8.svg)
+![WebSocket](https://img.shields.io/badge/WebSocket-websocketpp%20%2B%20Asio-010101.svg)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)
-![Kubernetes](https://img.shields.io/badge/Kubernetes-K3s-326CE5.svg)
-![Redis](https://img.shields.io/badge/Redis-7.0-DC382D.svg)
+![Kubernetes](https://img.shields.io/badge/Kubernetes-HPA-326CE5.svg)
+![Redis](https://img.shields.io/badge/Redis-7-DC382D.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1.svg)
-![WebSocket](https://img.shields.io/badge/WebSocket-Async--IO-010101.svg)
 
-High-performance, multi-computer real-time chess engine where both players execute moves simultaneously without turn constraints. The system features airborne piece trajectories, mid-air collisions, authoritative C++ engine validation, responsive rendering, Docker orchestration, and persistent PostgreSQL and Redis integration.
+KungFu Chess is a real-time chess variant with **no turns**: both players can move any of their pieces at any moment. Pieces travel across the board over time, rest (cool down) after moving, and can **jump** to dodge or intercept attacks in mid-air. The game ends when a king is captured.
+
+The project includes an authoritative C++ game server over WebSockets, an OpenCV desktop client, ELO-based matchmaking, private rooms with spectators, reconnection handling, and Docker / Kubernetes deployment files.
 
 ---
 
-## Architecture Overview (6 Core System Components)
+## Gameplay
 
-The architecture follows a distributed authoritative model designed to handle concurrent game instances at scale (target volume: 10 Million Concurrent Connected Users / 10M CCU).
+- **Real-time movement** – a selected piece moves toward its target at a speed defined in its `config.json` (`speed_m_per_sec`). Standard chess movement geometry and path blocking are enforced by `rules::PieceRules`.
+- **Rest states** – after a move a piece enters `long_rest`; after a jump it enters `short_rest`. A resting piece cannot be moved until its cooldown finishes (a cooldown bar is drawn on the board).
+- **Jumps** – a jumping piece is airborne for a short time. A piece that is in the air at a cell captures an enemy piece arriving there (mid-air capture).
+- **Captures and scoring** – captures award material points (pawn 1 … queen 9, king 10), shown on the score panel.
+- **Promotion** – a pawn that reaches the last rank becomes a queen.
+- **Win condition** – capturing the opponent's king ends the game.
+- **Sound effects** – move, jump, capture, illegal move, promotion, win and loss (Windows only, via WinMM).
+
+### Controls
+
+| Action | Input |
+|---|---|
+| Move a piece | Left-click a piece, then left-click the target cell (or drag and drop) |
+| Jump | Right-click a piece |
+| Find a match / cancel search | Click **Find Match** or press `Space` / `Enter` on the home screen |
+| Create or join a room | Click the room button, type a room name or ID, then **Create** / **Join** |
+| Quit | `Esc` |
+
+---
+
+## Run Modes
+
+`app.exe` (built from [main.cpp](main.cpp)) runs in one of three modes:
+
+| Mode | Command | Description |
+|---|---|---|
+| Local | `app.exe` | Offline game on one computer, both colors controlled with the mouse |
+| Server | `app.exe server <ip> <port>` | Starts the authoritative WebSocket game server (default port `8080`; it listens on all IPv4 interfaces) |
+| Client | `app.exe client <server_ip> <port> [username] [password]` | Connects to a server, logs in, and opens the full-screen game client. Missing credentials are prompted on the command line |
+
+> In server mode the second argument is the IP slot and the third is the port, e.g. `app.exe server 0.0.0.0 8080`.
+
+---
+
+## Architecture
 
 ```mermaid
 graph TD
-    Client1["Client PC 1 (Windows CLI / OpenCV)"]
-    Client2["Client PC 2 (Windows CLI / OpenCV)"]
-    
-    subgraph Edge & Gateway Layer
-        APIGW["1. API Gateway\n(Auth, Users, History)"]
-        WSGW["2. WebSocket Gateway\n(Live Conn & 30 FPS State Stream)"]
-    end
-    
-    subgraph Orchestration & Matchmaking
-        MM["3. Matchmaker\n(ELO Queue +-100)"]
-        GA["4. Game Allocator\n(Shards Assignment)"]
-    end
-    
-    subgraph Core Engine Shards
-        GS1["5. Game Server Shard 1\n(Authoritative C++ Engine)"]
-        GS2["5. Game Server Shard 2\n(Authoritative C++ Engine)"]
-    end
-    
-    subgraph Data & Persistence Layer
-        Redis[("Redis 7\nSessions, Active Rooms, Reconnect")]
-        Postgres[("PostgreSQL 16\nUsers, ELO, Game History")]
-    end
-    
-    subgraph Observability
-        Obs["6. Observability & Load Tester\n(Logs, C++ Native Load Testing)"]
+    C1["Client 1<br/>OpenCV GUI + SocketClient"]
+    C2["Client 2<br/>OpenCV GUI + SocketClient"]
+    V["Spectators"]
+
+    subgraph Server["Game Server (app.exe server)"]
+        WS["SocketServer<br/>websocketpp / Asio"]
+        MM["Matchmaking<br/>ELO ±100, 60s timeout"]
+        R["Rooms<br/>create / join / spectate"]
+        GE["GameEngine per room<br/>RuleEngine + RealTimeArbiter"]
+        UM["UserManager<br/>auth + ELO"]
     end
 
-    Client1 -->|WS / Port 8080| WSGW
-    Client2 -->|WS / Port 8080| WSGW
-    Client1 -->|HTTP Login| APIGW
-    Client2 -->|HTTP Login| APIGW
-    
-    APIGW --> Postgres
-    WSGW <--> Redis
-    WSGW --> MM
-    MM --> GA
-    GA --> GS1
-    GA --> GS2
-    GS1 <--> Redis
-    GS2 <--> Redis
-    GS1 --> Postgres
-    Obs -.->|Monitors & Tests| GS1
+    U[("users.json")]
+    H[("game_history.log<br/>SQL INSERT statements")]
+    RD[("Redis<br/>session:&lt;username&gt; TTL")]
+
+    C1 <-->|WebSocket text commands / JSON state| WS
+    C2 <-->|WebSocket| WS
+    V <-->|WebSocket| WS
+    WS --> MM --> R --> GE
+    WS --> UM --> U
+    GE -->|game over| H
+    R -->|SETEX async| RD
+```
+
+### How a game flows
+
+1. The client connects and sends `LOGIN <user> <pass>`. `UserManager` logs in an existing user or registers a new one with ELO 1200 and replies `AUTH_OK`.
+2. The client sends `FIND_MATCH`. Every server tick, players whose ELO is within ±100 are paired (`MATCH_FOUND`). A player who waits 60 seconds gets `MATCH_TIMEOUT`.
+   A player can also send `CREATE_ROOM <name>` / `JOIN_ROOM <id|name>`. The second player in a room plays black, and anyone after that joins as a spectator.
+3. During the game the client sends `MOVE` and `JUMP` requests. The server checks ownership and rules, applies them to the room's `GameEngine`, and broadcasts the room state as JSON (board, motions, jumps, cooldowns, scores, sounds).
+4. The server game loop advances every ~30 ms. The client renders at ~60 FPS and interpolates animations between updates.
+5. If a player disconnects, a 20-second reconnection countdown starts and the session is written to Redis with a 20-second TTL. A player who logs back in returns to the same room and color. If they don't return in time, the opponent wins by forfeit.
+6. When the game ends, both players' ELO is updated (K = 32) in `users.json` and the result is appended to `game_history.log` as a PostgreSQL `INSERT INTO games …` statement.
+
+---
+
+## Project Structure
+
+```
+main.cpp                 Entry point: local / server / client modes
+include/, src/
+  engine/                GameEngine – applies move/jump requests and advances time
+  model/                 Board, Piece, Position, GameState, BoardFactory
+  rules/                 RuleEngine, PieceRules – legal move geometry and path checks
+  realtime/              RealTimeArbiter, Motion – movement, jumps, cooldowns, collisions, promotion
+  network/               SocketServer (matchmaking, rooms, reconnect), SocketClient
+  input/                 GuiController, Controller, BoardMapper – mouse/keyboard → board actions
+  view/                  Renderer + board/piece/score/overlay/opening renderers, sprite animation
+  io/                    UserManager, RedisSessionStore, GameHistoryLogger, SoundPlayer,
+                         BoardParser / BoardPrinter
+  pubsub/                MessageBus – events for sounds, scores, move log
+assets/
+  board.png, Home_screen.jpg
+  pieces/<XX>/states/    Sprites and config.json per piece per state
+                         (idle, move, jump, short_rest, long_rest)
+  sounds/                Sound effects
+tests/
+  unit/                  doctest unit tests (board, rules, arbiter, engine, parser, mapper...)
+  load/                  load_tester.cpp – 50 concurrent client connections
+thirdparty/              Asio (standalone) and websocketpp (header-only)
+doctest.h                Unit-testing framework (single header)
+compile_app.bat          Windows build script (MSVC)
+Dockerfile               Linux build of the game server
+docker-compose.yml       Game server + Redis + PostgreSQL
+k8s/deployment.yaml      Kubernetes namespace, deployments, services, HPA, secret, PVC
+init.sql                 PostgreSQL schema (users, games) and seed users
+users.json               User store (username, password, ELO, wins, losses)
+```
+
+Piece folder names combine kind and color: `K` king, `Q` queen, `R` rook, `B` bishop, `N` knight, `P` pawn, followed by `W` (white) or `B` (black). For example, `NB` is the black knight.
+
+Each state's `config.json` controls physics and animation:
+
+```json
+{
+  "physics":  { "speed_m_per_sec": 1.5, "next_state_when_finished": "long_rest" },
+  "graphics": { "frames_per_sec": 10, "is_loop": true }
+}
 ```
 
 ---
 
-## Component Breakdown
+## Building
 
-| Component | Functionality | Implementation / Reference |
-|---|---|---|
-| **1. API Gateway** | Authentication, user registration, and persistent record access | `src/io/user_manager.cpp` |
-| **2. WebSocket Gateway** | Manages persistent client connections and 30 FPS state broadcasts | `src/network/socket_server.cpp` |
-| **3. Matchmaker** | ELO-based matchmaking queue (+-100 ELO tolerance) | `SocketServer::process_matchmaking` |
-| **4. Game Allocator** | Room assignment and server shard routing | `SocketServer::m_rooms` |
-| **5. Game Server Shards** | Authoritative C++ GameEngine (Single Source of Truth) | `src/engine/game_engine.cpp` |
-| **6. Observability** | Native C++ load testing, activity logging, and system metrics | `tests/load/load_tester.cpp` |
+### Windows (MSVC + OpenCV)
 
----
+Requirements:
+- Visual Studio 2022 (C++ desktop workload)
+- OpenCV 4.12 Windows build (`opencv_world4120.lib` / `.dll`)
 
-## SOLID Design & Micro-Services Architecture
-
-The project adheres to **SOLID software design principles**:
-- **Single Responsibility Principle (SRP)**: Separated persistence responsibilities into dedicated classes:
-  - `GameHistoryLogger`: Writes PostgreSQL-compatible match audit records (`src/io/game_history_logger.cpp`).
-  - `RedisSessionStore`: Manages async non-blocking RESP TCP session key storage and TTLs in Redis (`src/io/redis_session_store.cpp`).
-  - `UserManager`: Handles user authentication and ELO rating math exclusively (`src/io/user_manager.cpp`).
-- **Non-Blocking Network Architecture**: Asynchronous detached worker threads handle Redis state synchronization and DB audit logs without impeding the 60 FPS primary rendering loop.
-
----
-
-## Scale and Traffic Estimates (10M CCU Scale)
-
-- **Concurrent Active Games**: 5,000,000 active room instances.
-- **Upstream Network Ingestion**: ~0.8 Gbps aggregated move payload volume.
-- **Downstream Broadcast Payload**: ~480 Gbps aggregated state update volume at 30 FPS.
-- **Shard Container Topology**: Distributed across worker container instances (25,000 active rooms per shard).
-
----
-
-## Key Technical Features
-
-- **Authoritative C++ Engine**: Game state and rules are computed entirely on the server; client input acts solely as execution requests.
-- **Zero-Latency Event Dispatching**: State updates are broadcast immediately upon validating player input.
-- **Responsive Full-Screen Display**: Responsive OpenCV windowing configured for native monitor resolution without aspect distortion.
-- **Multi-Computer LAN & Wi-Fi Operations**: Supports remote socket connections across network interfaces (0.0.0.0 binding).
-- **Session Reconnection and Graceful Handling**: 20-second reconnection window backed by Redis session TTLs (`session:<username>`).
-- **PostgreSQL Game Audit Trail**: Completed match details are logged via `GameHistoryLogger` to `game_history.log` for database ingestion.
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- Windows 10/11 (x64) or Linux environment
-- MSVC C++17 Compiler / Visual Studio 2022
-- OpenCV 4.x C++ SDK
-- Docker & Docker Compose or Kubernetes (k8s/k3s)
-
----
-
-## Execution and Deployment
-
-### 1. Docker Compose Deployment
-
-To compile and launch the full service stack (C++ Game Server, Redis, PostgreSQL):
+`compile_app.bat` runs `vcvars64.bat` and compiles all sources into `app.exe`:
 
 ```cmd
+compile_app.bat
+```
+
+> The script expects OpenCV in `C:\Users\shira\Downloads\opencv\build`. If OpenCV is installed elsewhere, edit the `/I` and `/LIBPATH` paths in the script and in `.clangd`.
+> `opencv_world4120.dll` must sit next to `app.exe` (it is already in the repository root).
+
+### Linux / Docker
+
+The `Dockerfile` builds the server with `g++ -std=c++17` on Ubuntu 22.04 (OpenCV, Boost, websocketpp from apt). The container starts with `app server 8080`.
+
+---
+
+## Deployment
+
+### Docker Compose
+
+Starts the game server, Redis 7 and PostgreSQL 16. `init.sql` runs automatically and creates the `users` and `games` tables.
+
+```bash
 docker-compose up --build
 ```
 
-### 2. Kubernetes (K3s / Minikube) Deployment
+| Service | Container | Port |
+|---|---|---|
+| Game server | `kungfu_game_server` | 8080 |
+| Redis | `kungfu_redis` | 6379 |
+| PostgreSQL | `kungfu_postgres` | 5432 |
 
-To deploy to a managed Kubernetes cluster with HPA autoscaling (up to 400 replicas):
+### Kubernetes
 
-```cmd
+```bash
+docker build -t kungfu-chess-server:latest .
 kubectl apply -f k8s/deployment.yaml
 ```
 
-### 3. Multi-Computer LAN Configuration
+Creates the `kungfu-chess` namespace with PostgreSQL (with PVC), Redis, and the game server (`LoadBalancer` service, TCP liveness/readiness probes), plus a **HorizontalPodAutoscaler** that scales from 1 to 400 replicas at 70% CPU. Before deploying, replace the placeholder password in the `db-secret` secret.
 
-**Server Host (Computer 1):**
-```cmd
-compile_app.bat
-app.exe client <SERVER_IP> 8080 <username_1> <password>
-```
-
-**Client Host (Computer 2):**
-```cmd
-app.exe client <SERVER_IP> 8080 <username_2> <password>
-```
+> Rooms and game state are kept in the memory of each server process. Running more than one replica would require sticky routing, so each room's players reach the same pod.
 
 ---
 
-## Data Inspection Commands
+## Playing over LAN / Wi-Fi
 
-### Query PostgreSQL User Records and ELO
+**Computer 1 (server + first player):**
 ```cmd
+app.exe server 0.0.0.0 8080
+app.exe client 127.0.0.1 8080 alice 1234
+```
+
+**Computer 2 (second player):**
+```cmd
+app.exe client <SERVER_IP> 8080 bob 1234
+```
+
+Make sure port 8080 is allowed through the server computer's firewall.
+
+---
+
+## Testing
+
+### Unit tests (doctest)
+
+Unit tests are in `tests/unit/`, and `test_main.cpp` provides the doctest entry point. To build them, compile the test files together with the project sources (without `main.cpp`). From a Developer Command Prompt:
+
+```cmd
+cl /EHsc /std:c++17 /DASIO_STANDALONE /D_WEBSOCKETPP_CPP11_STL_ /I. /Ithirdparty/asio /Ithirdparty/websocketpp /Iinclude /Iinclude/view /I<opencv>\include ^
+   tests\unit\*.cpp src\pubsub\*.cpp src\network\*.cpp src\model\*.cpp src\rules\*.cpp src\realtime\*.cpp src\engine\*.cpp src\input\*.cpp src\io\*.cpp src\view\*.cpp ^
+   /Fe:run_tests.exe /link /LIBPATH:<opencv>\x64\vc16\lib opencv_world4120.lib ws2_32.lib winmm.lib
+run_tests.exe
+```
+
+### Load test
+
+`tests/load/load_tester.cpp` opens 50 concurrent clients against `127.0.0.1:8080`. Each one logs in as `test_user_<n>` and sends `FIND_MATCH`. When it finishes, it reports how many connections succeeded and how long the run took. Build it the same way as the unit tests, with `tests\load\load_tester.cpp` instead of `tests\unit\*.cpp`, and run it while the server is up.
+
+---
+
+## Logs and Data
+
+| File / Store | Content |
+|---|---|
+| `users.json` | Registered users, passwords, ELO, wins and losses (updated by the server) |
+| `game_history.log` | One SQL `INSERT INTO games …` line per finished game, ready to import into PostgreSQL |
+| `server_activity.log` | Server events: rooms, moves, disconnects, forfeits |
+| `client_activity.log` | Client-side event log |
+| Redis `session:<username>` | Room ID of an active player (TTL 20 s) |
+
+Useful inspection commands when running with Docker Compose:
+
+```bash
+# Users and games tables in PostgreSQL
 docker exec -it kungfu_postgres psql -U shira -d kungfu_chess -c "SELECT * FROM users;"
-```
-
-### Query PostgreSQL Game Logs
-```cmd
 docker exec -it kungfu_postgres psql -U shira -d kungfu_chess -c "SELECT * FROM games;"
-```
 
-### Inspect Active Redis Session Keys
-```cmd
+# Import the logged game history into PostgreSQL
+docker exec -i kungfu_postgres psql -U shira -d kungfu_chess < game_history.log
+
+# Active Redis sessions
 docker exec -it kungfu_redis redis-cli KEYS "session:*"
 ```
 
 ---
 
-## Automated Load Testing
+## Design Notes
 
-Run the native C++ load test simulating 50 concurrent client connections:
-
-```cmd
-run_load_test.bat
-```
+- **Authoritative server** – clients only send requests. All rules, timing and captures run in the server's `GameEngine`, and clients render the state they receive.
+- **Single Responsibility** – persistence is split into separate classes: `UserManager` (authentication and ELO), `RedisSessionStore` (non-blocking RESP `SETEX` on a detached thread), and `GameHistoryLogger` (match audit records).
+- **Event bus** – `pubsub::MessageBus` keeps the game logic separate from sound and UI side effects.
+- **Data-driven assets** – piece speeds, rest durations and animation rates live in per-state JSON configs, so they can be tuned without recompiling.
 
 ---
 
 ## Author
 
-- **Shira Azuelos** — Computer Science Engineering Project
+**Shira Azuelos** — Computer Science Engineering Project
