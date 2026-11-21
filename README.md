@@ -210,7 +210,22 @@ Make sure port 8080 is allowed through the server computer's firewall.
 
 ### Unit tests (doctest)
 
-Unit tests are in `tests/unit/`, and `test_main.cpp` provides the doctest entry point. To build them, compile the test files together with the project sources (without `main.cpp`). From a Developer Command Prompt:
+The project uses [doctest](https://github.com/doctest/doctest), a single-header testing framework (`doctest.h` in the repository root). `tests/unit/test_main.cpp` defines `DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN`, and the other test files hold 28 `TEST_CASE`s:
+
+| Test file | What it covers |
+|---|---|
+| `test_position.cpp` | `Position` struct |
+| `test_board.cpp` | Board boundaries and piece tracking |
+| `test_board_mapper.cpp` | Pixel-to-cell conversion, clicks outside the board |
+| `test_board_parser.cpp` | Valid boards, inconsistent row length, invalid piece tokens |
+| `test_board_printer.cpp` | Parse → print round-trip |
+| `test_piece_rules.cpp` | Movement geometry of king, queen, rook, bishop, knight and pawn |
+| `test_rule_engine.cpp` | Captures and blocking pieces |
+| `test_controller.cpp` | A move through the controller and engine takes the expected time |
+| `test_game_engine.cpp` | Movement blocking, re-moving, pawn double move and promotion, game over after a king capture |
+| `test_real_time_arbiter.cpp` | Movement over time, cooldowns, concurrent moves, mid-air capture, same-color and different-color collisions, escaping pieces, no early game over |
+
+To build them, compile the test files together with the project sources (without `main.cpp`). From a Developer Command Prompt:
 
 ```cmd
 cl /EHsc /std:c++17 /DASIO_STANDALONE /D_WEBSOCKETPP_CPP11_STL_ /I. /Ithirdparty/asio /Ithirdparty/websocketpp /Iinclude /Iinclude/view /I<opencv>\include ^
